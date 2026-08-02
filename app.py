@@ -106,16 +106,34 @@ model_key = st.sidebar.selectbox(
 entry = MODEL_REGISTRY[model_key]
 st.sidebar.caption(entry.blurb)
 
+# Load before drawing the threshold slider so it can start at the model's own operating
+# point. These models are not calibrated to each other -- the transformer's tuned cutoff
+# is 0.11, and forcing 0.5 on it would make it flag nothing at all.
+bundle = None
+load_error = None
+if entry.selectable and entry.artifact_exists:
+    try:
+        bundle = get_model(model_key)
+    except Exception as exc:
+        load_error = exc
+
+tuned = float(bundle.get("threshold", 0.5)) if isinstance(bundle, dict) else 0.5
+
 threshold = st.sidebar.slider(
     "Decision threshold",
-    min_value=0.05,
+    min_value=0.01,
     max_value=0.95,
-    value=0.50,
-    step=0.05,
-    help="Anything at or above this probability is called positive. Both notebooks argue "
-         "for a threshold well below 0.5, since a missed sepsis case is far more costly "
-         "than a false alarm.",
+    value=round(tuned, 2),
+    step=0.01,
+    # A per-model key so switching models resets to that model's own default rather
+    # than carrying the previous model's cutoff across.
+    key=f"threshold_{model_key}",
+    help="Anything at or above this probability is called positive. Sepsis hours are rare, "
+         "so the useful cutoffs sit well below 0.5 -- a missed case costs far more than a "
+         "false alarm.",
 )
+if abs(threshold - tuned) < 1e-9 and tuned != 0.5:
+    st.sidebar.caption(f"Starting at {tuned:.2f}, this model's tuned operating point.")
 
 options = {"threshold": threshold}
 if entry.sequence_model:
@@ -159,6 +177,8 @@ elif not entry.artifact_exists:
 
 if blocked:
     st.warning(blocked)
+elif load_error is not None:
+    st.error(f"Could not load {entry.display_name}: {load_error}")
 
 if entry.sequence_model and not entry.coming_soon:
     st.info(
@@ -174,12 +194,11 @@ with st.form("patient_form"):
     submitted = st.form_submit_button(
         f"Predict with {entry.display_name}",
         type="primary",
-        disabled=bool(blocked),
+        disabled=bool(blocked) or load_error is not None,
     )
 
-if submitted and not blocked:
+if submitted and not blocked and load_error is None:
     try:
-        bundle = get_model(model_key)
         prediction = model_utils.predict(model_key, bundle, values, options)
     except ModelUnavailableError as exc:
         st.error(str(exc))

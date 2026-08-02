@@ -423,17 +423,6 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
         predictor=predict_random_forest,
         export_hint="Run the last cell of sepsis_random_forest_cross_hospital.ipynb.",
     ),
-    "grud": ModelEntry(
-        key="grud",
-        display_name="GRU-D",
-        blurb="Recurrent network with learned decay for irregular sampling. "
-              "Consumes an hourly sequence and scores each hour.",
-        artifact=MODELS_DIR / "grud_sepsis.pt",
-        loader=load_grud,
-        predictor=predict_grud,
-        sequence_model=True,
-        export_hint="Run the last cell of GRU-D.ipynb (it trains on Hospital A, then saves).",
-    ),
     "temporal_transformer": ModelEntry(
         key="temporal_transformer",
         display_name="Temporal Transformer",
@@ -445,6 +434,23 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
         sequence_model=True,
         max_sequence_length=48,
         export_hint="Run temptransformersepsis-2.py; its section 8b writes the artifact.",
+    ),
+    # --- not in the current deployment ------------------------------------------------
+    # GRU-D is fully implemented: load_grud and predict_grud below are wired and tested.
+    # It is greyed out only because no trained artifact ships with this deployment. To
+    # bring it back, run the export cell at the end of GRU-D.ipynb to produce
+    # models/grud_sepsis.pt, then delete the `coming_soon=True` line here.
+    "grud": ModelEntry(
+        key="grud",
+        display_name="GRU-D",
+        blurb="Recurrent network with learned decay for irregular sampling. Implemented "
+              "and tested, but not trained for this deployment.",
+        artifact=MODELS_DIR / "grud_sepsis.pt",
+        loader=load_grud,
+        predictor=predict_grud,
+        sequence_model=True,
+        coming_soon=True,
+        export_hint="Run the last cell of GRU-D.ipynb (it trains on Hospital A, then saves).",
     ),
     "catboost": ModelEntry(
         key="catboost",

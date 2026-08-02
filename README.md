@@ -11,11 +11,19 @@ hospital still works at the other.
 | Source | Model | Result |
 | --- | --- | --- |
 | `sepsis_random_forest_cross_hospital.ipynb` | Random Forest | 0.79 ROC AUC within hospital, 0.74 across hospitals |
-| `GRU-D.ipynb` | GRU-D | 0.799 within hospital, 0.653 across |
-| `temptransformersepsis-2.py` | Causal Temporal Transformer | See the script's metrics report |
+| `GRU-D.ipynb` | GRU-D | 0.799 within hospital, 0.653 across (not deployed) |
+| `temptransformersepsis-2.py` | Causal Temporal Transformer | 0.734 within hospital, 0.686 across |
 
-CatBoost and BRITS are not wired into the app yet; the dropdown shows both as
-"coming soon". See [BRITS](#brits-not-yet-servable) below for why.
+The app serves the Random Forest and the Temporal Transformer. GRU-D, CatBoost and BRITS
+appear in the dropdown as "coming soon" for different reasons:
+
+- **GRU-D** is fully implemented and tested -- `load_grud` and `predict_grud` are wired in
+  `model_utils.py`. It is greyed out only because no trained artifact ships here. Run the
+  export cell at the end of `GRU-D.ipynb`, then delete the `coming_soon=True` line from its
+  registry entry.
+- **CatBoost** has not been trained.
+- **BRITS** has weights but is missing the metadata needed to serve them. See
+  [BRITS](#brits-not-yet-servable) below.
 
 ## Getting the data
 
