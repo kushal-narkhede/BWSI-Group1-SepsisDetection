@@ -1,6 +1,18 @@
+# Runtime dependencies for the Streamlit app (app.py).
+# This is the file Streamlit Community Cloud installs from, so keep it lean --
+# every extra package is cold-start time during a demo.
+# For the notebooks as well, use: pip install -r requirements-dev.txt
+
+streamlit
 pandas
 numpy
 scikit-learn
-matplotlib
-jupyter
-ipykernel
+joblib
+
+# CPU-only PyTorch. A plain `torch` requirement resolves to the CUDA build on Linux
+# (~2.5 GB) and blows Streamlit Community Cloud's resource limit. The "+cpu" local
+# version exists only on PyTorch's own index, so this pins the source, not just the
+# version. If the cloud build fails to find this exact version, drop the "==..." and
+# keep the --extra-index-url line.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu

@@ -7,8 +7,11 @@ Original file is located at
     https://colab.research.google.com/drive/1BzO3N5utWAtncXT1ObWFYU2MVAhslYWp
 """
 
-from google.colab import drive
-drive.mount('/content/drive')
+try:
+    from google.colab import drive
+    drive.mount('/content/drive')
+except ImportError:
+    pass   # running locally; data is read from data/ instead
 
 import numpy as np
 import pandas as pd
@@ -101,8 +104,8 @@ try:
 except ImportError:
     pass
 
-PATH_A = "/content/drive/MyDrive/CombinedA_patient_id_cleaned.csv"
-PATH_B = "/content/drive/MyDrive/CombinedB_patient_id_cleaned.csv"
+PATH_A = "data/combinedA_patient_id_cleaned.csv"
+PATH_B = "data/combinedB_patient_id_cleaned.csv"
 
 # Global Reproducibility Seeds
 SEED = 42
@@ -269,84 +272,13 @@ class FocalLoss(nn.Module):
         loss = alpha_weight * focal_weight * bce_loss
         return loss.mean()
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=500, dropout=0.1):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        x = x + self.pe[:, :x.size(1)]
-        return self.dropout(x)
-
-class InputProjectionHead(nn.Module):
-    def __init__(self, in_features, d_model, dropout=0.3):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_features, d_model),
-            nn.LayerNorm(d_model),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, d_model),
-            nn.LayerNorm(d_model)
-        )
-    def forward(self, x):
-        return self.net(x)
-
-class CausalTemporalTransformer(nn.Module):
-    def __init__(self, num_features, d_model=128, nhead=8, num_layers=4, dim_feedforward=256, dropout=0.3, max_len=48):
-        super().__init__()
-        self.projection = InputProjectionHead(num_features, d_model, dropout)
-        self.pos_encoder = PositionalEncoding(d_model, max_len=max_len, dropout=dropout)
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        self.classifier = nn.Sequential(
-            nn.Linear(d_model, 64),
-            nn.LayerNorm(64),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, 1)
-        )
-
-    def forward(self, x, src_key_padding_mask=None):
-        seq_len = x.size(1)
-
-        x_proj = self.projection(x)
-        x_pos = self.pos_encoder(x_proj)
-
-        causal_mask = torch.triu(
-            torch.full((seq_len, seq_len), float('-inf'), device=x.device),
-            diagonal=1
-        )
-
-        padding_mask_float = None
-        if src_key_padding_mask is not None:
-            padding_mask_float = torch.zeros_like(src_key_padding_mask, dtype=x.dtype)
-            padding_mask_float = padding_mask_float.masked_fill(src_key_padding_mask, float('-inf'))
-
-        out = self.transformer(
-            x_pos,
-            mask=causal_mask,
-            src_key_padding_mask=padding_mask_float
-        )
-
-        logits = self.classifier(out).squeeze(-1)
-        return logits
+# Architecture lives in temporal_transformer_model.py so the demo app can rebuild the
+# exact same network when it loads the exported state_dict.
+from temporal_transformer_model import (
+    PositionalEncoding,
+    InputProjectionHead,
+    CausalTemporalTransformer,
+)
 
 model = CausalTemporalTransformer(
     num_features=len(all_feature_cols),
@@ -470,6 +402,68 @@ print(results_df.round(4).to_string())
 print("="*80)
 
 # ------------------------------------------------------------------------------
+# 8b. EXPORT FOR THE DEMO APP
+# ------------------------------------------------------------------------------
+# Everything the app needs to rebuild an input row goes in the checkpoint: the exact
+# engineered feature order, the StandardScaler statistics, and the Hospital A medians
+# used to fill unobserved values. Hardcoding 90+ engineered column names in app.py
+# would rot the first time this pipeline changes.
+print("\n[Export] Saving model + preprocessing for the demo app...")
+
+from pathlib import Path
+
+MODELS_DIR = Path("models")
+MODELS_DIR.mkdir(exist_ok=True)
+
+tt_checkpoint = {
+    "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+    "feature_cols": list(all_feature_cols),
+    "num_features": len(all_feature_cols),
+    "d_model": 128,
+    "nhead": 8,
+    "num_layers": 4,
+    "dim_feedforward": 256,
+    "dropout": 0.3,
+    "max_seq_len": MAX_SEQ_LEN,
+    "scaler_mean": scaler.mean_.astype(np.float32),
+    "scaler_scale": scaler.scale_.astype(np.float32),
+    "medians": {k: float(v) for k, v in hospA_medians.items()},
+    # Youden-J optimal cutoff from the Hospital A validation split, not a naive 0.5.
+    "threshold": float(val_results["Optimal_Threshold"]),
+    "metrics": {
+        "val_a_auroc": float(val_results["AUROC"]),
+        "test_b_auroc": float(test_b_results["AUROC"]),
+    },
+    "trained_on": "combinedA_patient_id_cleaned (Hospital A, 80% train split)",
+}
+
+tt_path = MODELS_DIR / "temporal_transformer_sepsis.pt"
+torch.save(tt_checkpoint, tt_path)
+print(f"  saved {tt_path} ({tt_path.stat().st_size / 1e6:.1f} MB)")
+print(f"  features: {len(all_feature_cols)} | max_seq_len: {MAX_SEQ_LEN} | threshold: {tt_checkpoint['threshold']:.3f}")
+
+# Round-trip through the shared class the app uses, so an architecture change fails
+# here rather than as a key mismatch inside Streamlit.
+_reloaded = torch.load(tt_path, map_location="cpu", weights_only=False)
+_check = CausalTemporalTransformer(
+    num_features=_reloaded["num_features"], d_model=128, nhead=8, num_layers=4,
+    dim_feedforward=256, dropout=0.3, max_len=_reloaded["max_seq_len"]
+)
+_check.load_state_dict(_reloaded["state_dict"])
+print("  reloaded into temporal_transformer_model.CausalTemporalTransformer OK")
+
+# The app derives engineered columns from a single snapshot; every base column it has
+# to supply must exist on the form.
+import model_utils
+
+_base_needed = {
+    c for c in all_feature_cols
+    if not c.endswith(("_delta3h", "_min_6h", "_max_6h", "_mean_6h", "_elapsed_hrs", "_is_missing"))
+}
+_unknown = sorted(c for c in _base_needed if c not in model_utils.FEATURES_BY_NAME)
+print("  base columns missing from the app form:", _unknown or "none")
+
+# ------------------------------------------------------------------------------
 # 9. INTEGRATED GRADIENTS FEATURE IMPORTANCE
 # ------------------------------------------------------------------------------
 print("\n[5/6] Computing Integrated Gradients Feature Importance...")
@@ -537,8 +531,8 @@ try:
 except ImportError:
     pass
 
-PATH_A = "/content/drive/MyDrive/CombinedA_patient_id_cleaned.csv"
-PATH_B = "/content/drive/MyDrive/CombinedB_patient_id_cleaned.csv"
+PATH_A = "data/combinedA_patient_id_cleaned.csv"
+PATH_B = "data/combinedB_patient_id_cleaned.csv"
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"[Setup] Executing 4-Quadrant Pipeline on: {device}")
