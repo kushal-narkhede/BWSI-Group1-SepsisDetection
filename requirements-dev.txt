@@ -1,0 +1,9 @@
+# Everything in the app, plus what the notebooks and training scripts need.
+# Use this locally; the deployed app installs requirements.txt only.
+
+-r requirements.txt
+
+matplotlib
+seaborn
+jupyter
+ipykernel

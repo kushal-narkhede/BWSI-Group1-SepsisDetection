@@ -1,2 +1,18 @@
+
 data/
 *.csv
+
+
+# models/ is deliberately NOT ignored -- Streamlit Community Cloud deploys from this
+# repo, so the artifacts have to be committed or the deployed app has nothing to serve.
+# Keep them small (single-digit MB). Anything approaching 50 MB will make GitHub complain
+# and slow every cloud redeploy.
+
+# Raw training checkpoint written to the repo root by temptransformersepsis-2.py.
+# The packaged artifact in models/ is the one the app uses.
+best_causal_transformer.pt
+
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
