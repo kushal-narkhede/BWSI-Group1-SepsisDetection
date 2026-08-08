@@ -12,6 +12,12 @@ data/
 # The packaged artifact in models/ is the one the app uses.
 best_causal_transformer.pt
 
+# Intermediate dataframes CATBOOST_MEDLYTICS.ipynb pickles for crash recovery (~250 MB each).
+cache/
+
+# Training logs CatBoost writes next to whatever process fitted a model.
+catboost_info/
+
 .venv/
 __pycache__/
 *.pyc
