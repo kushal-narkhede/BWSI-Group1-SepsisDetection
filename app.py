@@ -136,6 +136,19 @@ if abs(threshold - tuned) < 1e-9 and tuned != 0.5:
     st.sidebar.caption(f"Starting at {tuned:.2f}, this model's tuned operating point.")
 
 options = {"threshold": threshold}
+
+if entry.lab_draw_control and isinstance(bundle, dict):
+    st.sidebar.markdown("---")
+    options["labs_drawn"] = st.sidebar.multiselect(
+        "Labs drawn this hour",
+        options=bundle.get("sparse_labs", []),
+        default=[],
+        help="This model learned from which labs a clinician chose to order, not just their "
+             "values. Labs are ordered rarely, so leaving this empty is the common case in "
+             "the training data -- it reads the values above as carried forward from an "
+             "earlier draw. Tick a lab only if it was drawn this hour.",
+    )
+
 if entry.sequence_model:
     st.sidebar.markdown("---")
     seq_max = entry.max_sequence_length

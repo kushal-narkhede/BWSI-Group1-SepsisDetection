@@ -13,15 +13,20 @@ hospital still works at the other.
 | `sepsis_random_forest_cross_hospital.ipynb` | Random Forest | 0.79 ROC AUC within hospital, 0.74 across hospitals |
 | `GRU-D.ipynb` | GRU-D | 0.799 within hospital, 0.653 across (not deployed) |
 | `temptransformersepsis-2.py` | Causal Temporal Transformer | 0.734 within hospital, 0.686 across |
+| `CATBOOST_MEDLYTICS.ipynb` | CatBoost | **0.829 within hospital, 0.751 across** |
 
-The app serves the Random Forest and the Temporal Transformer. GRU-D, CatBoost and BRITS
-appear in the dropdown as "coming soon" for different reasons:
+CatBoost is the strongest cross-hospital model of the four, and by a clear margin. It is
+also the only pipeline where missingness genuinely carries signal: it reads the raw export
+with gaps intact and learns from *which labs a clinician chose to order*, not just their
+values.
+
+The app serves the Random Forest, the Temporal Transformer and CatBoost. GRU-D and BRITS
+appear in the dropdown as "coming soon", for different reasons:
 
 - **GRU-D** is fully implemented and tested -- `load_grud` and `predict_grud` are wired in
   `model_utils.py`. It is greyed out only because no trained artifact ships here. Run the
   export cell at the end of `GRU-D.ipynb`, then delete the `coming_soon=True` line from its
   registry entry.
-- **CatBoost** has not been trained.
 - **BRITS** has weights but is missing the metadata needed to serve them. See
   [BRITS](#brits-not-yet-servable) below.
 
@@ -100,13 +105,14 @@ pip install -r requirements-dev.txt
 `requirements.txt` holds only what the deployed app needs; `requirements-dev.txt` adds
 matplotlib, seaborn and Jupyter for the notebooks and training scripts.
 
-The app serves models from `models/`, which is also gitignored (the Random Forest bundle is
-~75 MB). Build the artifacts by opening each notebook and running it through to the export
-cell at the bottom:
+The app serves models from `models/`, which **is** committed so cloud deploys have
+something to load. Rebuild any artifact by running its notebook through to the export cell
+at the bottom:
 
-- `sepsis_random_forest_cross_hospital.ipynb` -> `models/random_forest_sepsis.joblib`
-- `GRU-D.ipynb` -> `models/grud_sepsis.pt`
-- `temptransformersepsis-2.py` -> `models/temporal_transformer_sepsis.pt` (section 8b)
+- `sepsis_random_forest_cross_hospital.ipynb` -> `models/random_forest_sepsis.joblib` (6.9 MB)
+- `temptransformersepsis-2.py` -> `models/temporal_transformer_sepsis.pt` (section 8b, 2.3 MB)
+- `CATBOOST_MEDLYTICS.ipynb` -> `models/catboost_sepsis.cbm` (Block 16, 0.5 MB)
+- `GRU-D.ipynb` -> `models/grud_sepsis.pt` (not currently built)
 
 The transformer script is a Colab export containing two separate pipelines. Only the
 first one (the Causal Temporal Transformer, with focal loss and engineered features) is
@@ -138,6 +144,23 @@ missingness flags). The app derives all of those from the single snapshot by ass
 nothing changed and every value was measured this hour, which is the most favourable
 possible reading of the input. Its sequence length is also capped at 48 hours, because
 that is the positional-encoding window it was built with.
+
+**CatBoost and the lab-draw control.** CatBoost learned from 13 `*_tested` flags marking
+which labs were drawn each hour. Labs are ordered rarely, so in training those flags are
+usually 0 -- and when they are 1, it generally means a clinician was already concerned.
+Ticking every box would therefore push the score up for reasons that have nothing to do
+with the values you typed. The sidebar defaults to none drawn, which reads your entries as
+carried forward from an earlier draw. That is the most common pattern in the training data,
+so it is the most in-distribution default rather than merely the most conservative one.
+
+Two notes on the CatBoost pipeline worth knowing. Its input is rebuilt locally rather than
+read from a committed file: the Colab original read `combinedA_patient_id.csv`, which is the
+raw hourly export plus a `patient_id` column, and the load block reconstructs exactly that
+by joining `patient_id` from the `_cleaned` CSV onto the raw one (same rows, same order,
+asserted at load). And its per-patient fill step was rewritten -- the original
+`groupby('patient_id').apply(...)` silently drops the grouping column on pandas 2.2+, which
+made the next block fail with `KeyError: 'patient_id'`. The `groupby.ffill()/bfill()` form
+now used does the same fill, keeps the column, and is faster.
 
 This is coursework. None of these models is validated for clinical use.
 

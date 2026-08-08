@@ -78,11 +78,14 @@ FEATURE_SPEC: list[FeatureSpec] = [
     FeatureSpec("Lactate", "Lactate", "mmol/L", 1.8, 0.1, 30.0, 0.1, CHEMISTRY),
     FeatureSpec("Phosphate", "Phosphate", "mg/dL", 3.4, 0.5, 15.0, 0.1, CHEMISTRY),
     FeatureSpec("Potassium", "Potassium", "mmol/L", 4.1, 1.5, 9.0, 0.1, CHEMISTRY),
+    FeatureSpec("SaO2", "Arterial O2 saturation", "%", 97.0, 50.0, 100.0, 1.0, CHEMISTRY),
+    FeatureSpec("Magnesium", "Magnesium", "mg/dL", 2.0, 0.5, 10.0, 0.1, CHEMISTRY),
     # --- hematology ---
     FeatureSpec("Hct", "Hematocrit", "%", 30.2, 10.0, 60.0, 0.1, HEMATOLOGY),
     FeatureSpec("Hgb", "Hemoglobin", "g/dL", 10.4, 3.0, 20.0, 0.1, HEMATOLOGY),
     FeatureSpec("WBC", "White blood cell count", "10^3/uL", 10.8, 0.1, 100.0, 0.1, HEMATOLOGY),
     FeatureSpec("Platelets", "Platelets", "10^3/uL", 181.0, 5.0, 1000.0, 1.0, HEMATOLOGY),
+    FeatureSpec("PTT", "Partial thromboplastin time", "seconds", 32.4, 10.0, 200.0, 0.1, HEMATOLOGY),
     # --- demographics & admission context ---
     FeatureSpec("Age", "Age", "years", 65.25, 0.0, 110.0, 1.0, CONTEXT),
     FeatureSpec("Gender", "Gender", "0 = female, 1 = male", 1.0, 0.0, 1.0, 1.0, CONTEXT, binary=True),
@@ -379,6 +382,128 @@ def predict_temporal_transformer(bundle, values: dict[str, float], options: dict
 
 
 # --------------------------------------------------------------------------------------
+# CatBoost adapter
+# --------------------------------------------------------------------------------------
+# Trained on ~94 engineered columns: 6-hour rolling stats and slopes per vital, deviation
+# from each patient's own admission baseline, clinical composites (shock index, qSOFA
+# proxy, lab ratios), and "was this lab drawn this hour" flags. All of it is derivable from
+# a single snapshot -- see below for what each family collapses to.
+
+_CB_ROLLING = ("_mean6", "_max6", "_min6")
+_CB_FLAT = ("_std6", "_slope6", "_vs_baseline")
+
+
+def _safe_div(a: float, b: float) -> float:
+    return float(a) / float(b) if b else float("nan")
+
+
+def _catboost_row(feature_cols, values: dict[str, float], labs_drawn: Sequence[str]) -> np.ndarray:
+    drawn = set(labs_drawn or ())
+
+    def g(name: str) -> float:
+        return float(values[name])
+
+    # Composites the notebook builds from the raw vitals.
+    derived = {
+        "ShockIndex": _safe_div(g("HR"), g("SBP")),
+        "PulsePressure": g("SBP") - g("DBP"),
+        "MAP_SBP_ratio": _safe_div(g("MAP"), g("SBP")),
+        "Resp_O2_ratio": _safe_div(g("Resp"), g("O2Sat")),
+        "TempDeviation": abs(g("Temp") - 37.0),
+        "qSOFA_proxy": float(int(g("Resp") >= 22) + int(g("SBP") <= 100)),
+        "BUN_Cr_ratio": _safe_div(g("BUN"), g("Creatinine")),
+        "Hct_Hgb_ratio": _safe_div(g("Hct"), g("Hgb")),
+        # cumcount+1 within the stay, which is just hours elapsed in the ICU.
+        "MeasurementCount": g("ICULOS"),
+        "labs_drawn_this_hour": float(len(drawn)),
+    }
+
+    row = []
+    needed = []
+    for col in feature_cols:
+        if col in derived:
+            row.append(derived[col])
+        elif col.endswith("_tested"):
+            row.append(1.0 if col[: -len("_tested")] in drawn else 0.0)
+        elif col.endswith(_CB_FLAT):
+            # Over a window where nothing changes: zero spread, zero slope, and no
+            # deviation from the patient's own baseline.
+            row.append(0.0)
+        elif col.endswith(_CB_ROLLING):
+            base = col.rsplit("_", 1)[0]
+            if base in derived:
+                row.append(derived[base])
+            else:
+                needed.append(base)
+                row.append(float(values.get(base, 0.0)))
+        else:
+            needed.append(col)
+            row.append(float(values.get(col, 0.0)))
+
+    missing = sorted({n for n in needed if n not in values})
+    if missing:
+        raise MissingFeatureError(
+            "The form does not collect these inputs: "
+            + ", ".join(missing)
+            + ". Add a FeatureSpec for each one in model_utils.FEATURE_SPEC."
+        )
+    return np.asarray(row, dtype=np.float64)
+
+
+def load_catboost(path: Path):
+    import json
+
+    from catboost import CatBoostClassifier
+
+    model = CatBoostClassifier()
+    model.load_model(str(path))
+
+    raw = model.get_metadata().get("app_meta")
+    if not raw:
+        raise ModelUnavailableError(
+            f"{path.name} has no embedded app_meta. Re-run the export cell at the end of "
+            "CATBOOST_MEDLYTICS.ipynb, which stores the feature order and threshold in the model."
+        )
+    meta = json.loads(raw)
+
+    return {
+        "model": model,
+        "feature_cols": list(meta["feature_cols"]),
+        "sparse_labs": list(meta.get("sparse_labs", [])),
+        "threshold": float(meta.get("threshold", 0.5)),
+        "trained_on": meta.get("trained_on"),
+        "metrics": meta.get("metrics", {}),
+    }
+
+
+def predict_catboost(bundle, values: dict[str, float], options: dict | None = None) -> Prediction:
+    options = options or {}
+    threshold = float(options.get("threshold", bundle["threshold"]))
+    labs_drawn = options.get("labs_drawn", ())
+
+    row = _catboost_row(bundle["feature_cols"], values, labs_drawn)
+    prob = float(bundle["model"].predict_proba(row.reshape(1, -1))[0, 1])
+
+    notes = [
+        "Rolling 6-hour statistics were collapsed to the single snapshot: means, maxima "
+        "and minima equal the value you entered; spread, slope and drift from baseline are zero.",
+    ]
+    if labs_drawn:
+        notes.append(
+            f"Marked as drawn this hour: {', '.join(sorted(labs_drawn))} "
+            f"({len(labs_drawn)} labs)."
+        )
+    else:
+        notes.append(
+            "No labs marked as drawn this hour, so the values above are read as carried "
+            "forward from an earlier draw -- the common pattern in the training data."
+        )
+    if bundle.get("trained_on"):
+        notes.append(f"CatBoost trained on {bundle['trained_on']}.")
+    return Prediction(prob, prob >= threshold, threshold, bundle["feature_cols"], notes)
+
+
+# --------------------------------------------------------------------------------------
 # The registry
 # --------------------------------------------------------------------------------------
 
@@ -398,6 +523,9 @@ class ModelEntry:
     # Upper bound for the sequence-length control. The transformer's positional encoding
     # is built for a fixed window, so asking for more hours than that cannot work.
     max_sequence_length: int = 72
+    # Models trained on "was this lab drawn this hour" flags get a control for picking
+    # which labs were actually drawn, instead of silently assuming all or none.
+    lab_draw_control: bool = False
     export_hint: str = ""
 
     @property
@@ -435,6 +563,17 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
         max_sequence_length=48,
         export_hint="Run temptransformersepsis-2.py; its section 8b writes the artifact.",
     ),
+    "catboost": ModelEntry(
+        key="catboost",
+        display_name="CatBoost",
+        blurb="Gradient-boosted trees over engineered clinical features: rolling vital "
+              "trends, shock index, qSOFA proxy, lab ratios, and lab-ordering patterns.",
+        artifact=MODELS_DIR / "catboost_sepsis.cbm",
+        loader=load_catboost,
+        predictor=predict_catboost,
+        lab_draw_control=True,
+        export_hint="Run CATBOOST_MEDLYTICS.ipynb; its final block writes the artifact.",
+    ),
     # --- not in the current deployment ------------------------------------------------
     # GRU-D is fully implemented: load_grud and predict_grud below are wired and tested.
     # It is greyed out only because no trained artifact ships with this deployment. To
@@ -451,12 +590,6 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
         sequence_model=True,
         coming_soon=True,
         export_hint="Run the last cell of GRU-D.ipynb (it trains on Hospital A, then saves).",
-    ),
-    "catboost": ModelEntry(
-        key="catboost",
-        display_name="CatBoost",
-        blurb="Gradient-boosted trees. Not trained yet.",
-        coming_soon=True,
     ),
     "brits": ModelEntry(
         key="brits",

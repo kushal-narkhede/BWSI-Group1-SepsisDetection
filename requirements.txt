@@ -8,6 +8,7 @@ pandas
 numpy
 scikit-learn
 joblib
+catboost
 
 # CPU-only PyTorch. A plain `torch` requirement resolves to the CUDA build on Linux
 # (~2.5 GB) and blows Streamlit Community Cloud's resource limit. The "+cpu" local

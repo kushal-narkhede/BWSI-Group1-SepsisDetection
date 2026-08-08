@@ -7,3 +7,7 @@ matplotlib
 seaborn
 jupyter
 ipykernel
+
+# CATBOOST_MEDLYTICS.ipynb jits its rolling-slope feature with numba. Training only --
+# the app never recomputes it, so this stays out of requirements.txt.
+numba
